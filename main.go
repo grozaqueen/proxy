@@ -10,11 +10,12 @@ import (
 func main() {
 	store := proxy.NewRequestStore()
 
-	certManager, err := proxy.NewCertManager("certs/certs_cache")
+	certManager, err := proxy.NewCertManager("certs")
 	if err != nil {
-		log.Fatal("Failed to initialize certificate manager:", err)
+		log.Fatal("CertManager init failed:", err)
 	}
 
+	// Создание прокси с поддержкой MITM
 	proxyHandler := proxy.NewProxyHandler(store, certManager)
 
 	go func() {

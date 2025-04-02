@@ -1,59 +1,81 @@
 package proxy
 
 import (
+	"bufio"
+	"context"
 	"crypto/tls"
 	"io"
 	"log"
 	"net"
 	"net/http"
-	"time"
+	"strings"
 )
 
 func (p *ProxyHandler) handleHTTPS(w http.ResponseWriter, r *http.Request) {
-	host, port, err := net.SplitHostPort(r.Host)
+	host, _, err := net.SplitHostPort(r.Host)
 	if err != nil {
 		host = r.Host
-		port = "443"
 	}
 
-	destConn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 10*time.Second)
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+		return
+	}
+
+	clientConn, _, err := hijacker.Hijack()
 	if err != nil {
-		log.Printf("Failed to connect to target: %v", err)
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
+	defer clientConn.Close()
 
-	w.WriteHeader(http.StatusOK)
-	if flusher, ok := w.(http.Flusher); ok {
-		flusher.Flush()
-	}
-
-	clientConn, _, err := w.(http.Hijacker).Hijack()
-	if err != nil {
-		log.Printf("Hijack failed: %v", err)
+	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+		log.Printf("Failed to send 200 OK: %v", err)
 		return
 	}
 
-	go transfer(destConn, clientConn)
-	transfer(clientConn, destConn)
-}
+	cert, err := p.certManager.GenerateCert(host)
+	if err != nil {
+		log.Printf("Certificate generation failed for %s: %v", host, err)
+		return
+	}
 
-func transfer(dst io.Writer, src io.Reader) {
-	defer func() {
-		if c, ok := dst.(io.Closer); ok {
-			c.Close()
-		}
-		if c, ok := src.(io.Closer); ok {
-			c.Close()
-		}
-	}()
-	io.Copy(dst, src)
-}
-func (p *ProxyHandler) mitmConnection(clientConn net.Conn, destConn net.Conn, host string) {
-	defer clientConn.Close()
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ServerName:   host,
+		MinVersion:   tls.VersionTLS12,
+	}
+
+	tlsConn := tls.Server(clientConn, tlsConfig)
+	defer tlsConn.Close()
+
+	if err := tlsConn.Handshake(); err != nil {
+		log.Printf("TLS handshake with client failed: %v", err)
+		return
+	}
+
+	destConn, err := tls.Dial("tcp", r.Host, &tls.Config{
+		ServerName: host,
+	})
+	if err != nil {
+		log.Printf("Failed to connect to target %s: %v", r.Host, err)
+		return
+	}
 	defer destConn.Close()
 
-	cert, err := p.certManager.GetCert(host)
+	go func() {
+		io.Copy(destConn, tlsConn)
+		destConn.Close()
+	}()
+
+	io.Copy(tlsConn, destConn)
+}
+
+func (p *ProxyHandler) mitmConnection(clientConn net.Conn, host string) {
+	defer clientConn.Close()
+
+	cert, err := p.certManager.GenerateCert(host)
 	if err != nil {
 		log.Printf("Failed to generate cert for %s: %v", host, err)
 		return
@@ -61,10 +83,60 @@ func (p *ProxyHandler) mitmConnection(clientConn net.Conn, destConn net.Conn, ho
 
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{cert},
+		ServerName:   host,
 	}
+
 	tlsConn := tls.Server(clientConn, tlsConfig)
 	defer tlsConn.Close()
 
-	go io.Copy(destConn, tlsConn)
-	io.Copy(tlsConn, destConn)
+	if err := tlsConn.Handshake(); err != nil {
+		log.Printf("TLS handshake failed for %s: %v", host, err)
+		return
+	}
+
+	reader := bufio.NewReader(tlsConn)
+	req, err := http.ReadRequest(reader)
+	if err != nil {
+		log.Printf("Failed to read request from %s: %v", host, err)
+		return
+	}
+	defer req.Body.Close()
+
+	req.URL.Scheme = "https"
+	req.URL.Host = host
+	req.RequestURI = ""
+
+	req.Header.Del("Proxy-Connection")
+	req.Header.Del("Proxy-Authenticate")
+	req.Header.Del("Proxy-Authorization")
+
+	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil {
+		log.Printf("Failed to make request to %s: %v", host, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if err := resp.Write(tlsConn); err != nil {
+		log.Printf("Failed to write response to client: %v", err)
+	}
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(p []byte) (n int, err error) {
+	select {
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	default:
+		return r.reader.Read(p)
+	}
+}
+
+func isClosedConnError(err error) bool {
+	return strings.Contains(err.Error(), "use of closed network connection") ||
+		strings.Contains(err.Error(), "connection reset by peer")
 }

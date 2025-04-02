@@ -1,6 +1,15 @@
 #!/bin/bash
+set -e
+
 DOMAIN=$1
-openssl genrsa -out $DOMAIN.key 2048
-openssl req -new -key $DOMAIN.key -out $DOMAIN.csr -subj "/CN=$DOMAIN"
-openssl x509 -req -in $DOMAIN.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out $DOMAIN.crt -days 365 -sha256
-rm $DOMAIN.csr
+CERT_DIR=$(dirname "$0")
+
+openssl genrsa -out "$CERT_DIR/$DOMAIN.key" 2048
+openssl req -new -key "$CERT_DIR/$DOMAIN.key" -out "$CERT_DIR/$DOMAIN.csr" \
+  -subj "/CN=$DOMAIN" -addext "subjectAltName=DNS:$DOMAIN"
+
+openssl x509 -req -in "$CERT_DIR/$DOMAIN.csr" \
+  -CA "$CERT_DIR/ca.crt" -CAkey "$CERT_DIR/ca.key" -CAcreateserial \
+  -out "$CERT_DIR/$DOMAIN.crt" -days 365 -extfile <(printf "subjectAltName=DNS:$DOMAIN")
+
+rm -f "$CERT_DIR/$DOMAIN.csr"

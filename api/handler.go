@@ -3,7 +3,9 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/gorilla/mux"
 	"io"
+	"log"
 	"net/http"
 	"proxy-scanner/proxy"
 	"strings"
@@ -37,59 +39,42 @@ func (h *APIHandler) getRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *APIHandler) repeatRequest(w http.ResponseWriter, r *http.Request) {
-	id := r.URL.Query().Get("id")
+	id := mux.Vars(r)["id"]
 	if id == "" {
-		http.Error(w, "Missing id parameter", http.StatusBadRequest)
+		http.Error(w, "ID parameter is required", http.StatusBadRequest)
 		return
 	}
 
 	reqData, exists := h.store.Get(id)
 	if !exists {
-		http.NotFound(w, r)
+		http.Error(w, "Request not found", http.StatusNotFound)
 		return
 	}
 
 	req, err := http.NewRequest(reqData.Method, reqData.URL, bytes.NewReader(reqData.Body))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Failed to recreate request: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	for k, vv := range reqData.Headers {
-		for _, v := range vv {
-			req.Header.Add(k, v)
-		}
+	for k, values := range reqData.Headers {
+		req.Header[k] = values
 	}
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		http.Error(w, "Request failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
-	for k, vv := range resp.Header {
-		for _, v := range vv {
-			w.Header().Add(k, v)
-		}
+	for k, values := range resp.Header {
+		w.Header()[k] = values
 	}
+
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
-}
 
-func (h *APIHandler) scanRequest(w http.ResponseWriter, r *http.Request) {
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		http.Error(w, "Missing id parameter", http.StatusBadRequest)
-		return
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		log.Printf("Warning: error while copying response body: %v", err)
 	}
-
-	vulnerabilities, err := h.scanner.ScanRequest(id)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
-	}
-
-	json.NewEncoder(w).Encode(vulnerabilities)
 }

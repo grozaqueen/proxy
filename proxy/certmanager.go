@@ -2,88 +2,100 @@ package proxy
 
 import (
 	"crypto/tls"
+	"crypto/x509"
+	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 )
 
 type CertManager struct {
-	cacheDir string
-	caCert   tls.Certificate
-	mu       sync.Mutex
-	certs    map[string]tls.Certificate
+	mu      sync.Mutex
+	caCert  tls.Certificate
+	certDir string
+	certs   map[string]tls.Certificate // Единое поле для кэша (было certCache и certs)
 }
 
-func NewCertManager(cacheDir string) (*CertManager, error) {
-	caCert, err := tls.LoadX509KeyPair("certs/ca.crt", "certs/ca.key")
+func NewCertManager(certDir string) (*CertManager, error) {
+	if _, err := os.Stat(certDir); os.IsNotExist(err) {
+		return nil, fmt.Errorf("certificate directory does not exist: %s", certDir)
+	}
+
+	caCert, err := tls.LoadX509KeyPair(
+		filepath.Join(certDir, "ca.crt"),
+		filepath.Join(certDir, "ca.key"),
+	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load CA certificate: %v", err)
 	}
 
 	return &CertManager{
-		cacheDir: cacheDir,
-		caCert:   caCert,
-		certs:    make(map[string]tls.Certificate),
+		caCert:  caCert,
+		certDir: certDir,
+		certs:   make(map[string]tls.Certificate), // Инициализация кэша
 	}, nil
 }
 
 func (cm *CertManager) GenerateCert(host string) (tls.Certificate, error) {
+	normalizedHost := strings.Split(host, ":")[0]
+
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
-	log.Printf("Generating certificate for: %s", host)
-
-	if cert, ok := cm.certs[host]; ok {
-		log.Printf("Using cached certificate for: %s", host)
+	if cert, ok := cm.certs[normalizedHost]; ok {
+		log.Printf("Using cached certificate for: %s", normalizedHost)
 		return cert, nil
 	}
 
-	cmd := exec.Command("./gen_cert.sh", host)
-	cmd.Dir = cm.cacheDir
-	log.Printf("Executing: %v", cmd.Args)
+	log.Printf("Generating new certificate for: %s", normalizedHost)
+
+	cmd := exec.Command("/bin/bash", "/app/certs/gen_cert.sh", normalizedHost)
+	cmd.Dir = "/app/certs"
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
-		log.Printf("Command failed: %v", err)
-		return tls.Certificate{}, err
+		return tls.Certificate{}, fmt.Errorf("certificate generation failed: %v", err)
 	}
 
-	certFile := filepath.Join(cm.cacheDir, host+".crt")
-	keyFile := filepath.Join(cm.cacheDir, host+".key")
-	log.Printf("Loading cert: %s, key: %s", certFile, keyFile)
-
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	certPath := filepath.Join(cm.certDir, normalizedHost)
+	cert, err := tls.LoadX509KeyPair(
+		certPath+".crt",
+		certPath+".key",
+	)
 	if err != nil {
-		log.Printf("LoadX509KeyPair error: %v", err)
+		return tls.Certificate{}, fmt.Errorf("failed to load certificate: %v", err)
+	}
+
+	if err := cm.validateCertificate(cert); err != nil {
 		return tls.Certificate{}, err
 	}
 
-	cm.certs[host] = cert
+	cm.certs[normalizedHost] = cert
 	return cert, nil
 }
 
 func (cm *CertManager) GetCert(host string) (tls.Certificate, error) {
-	cm.mu.Lock()
-	defer cm.mu.Unlock()
+	return cm.GenerateCert(host)
+}
 
-	if cert, ok := cm.certs[host]; ok {
-		return cert, nil
-	}
-
-	cmd := exec.Command("./certs/gen_cert.sh", host)
-	cmd.Dir = cm.cacheDir
-	if err := cmd.Run(); err != nil {
-		return tls.Certificate{}, err
-	}
-
-	cert, err := tls.LoadX509KeyPair(
-		filepath.Join(cm.cacheDir, host+".crt"),
-		filepath.Join(cm.cacheDir, host+".key"),
-	)
+func (cm *CertManager) validateCertificate(cert tls.Certificate) error {
+	x509Cert, err := x509.ParseCertificate(cert.Certificate[0])
 	if err != nil {
-		return tls.Certificate{}, err
+		return fmt.Errorf("certificate parsing failed: %v", err)
 	}
 
-	cm.certs[host] = cert
-	return cert, nil
+	if time.Now().After(x509Cert.NotAfter) {
+		return fmt.Errorf("certificate expired")
+	}
+
+	if x509Cert.Subject.CommonName == "" {
+		return fmt.Errorf("certificate has empty Common Name")
+	}
+
+	return nil
 }

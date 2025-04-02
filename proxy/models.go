@@ -6,14 +6,20 @@ import (
 	"time"
 )
 
+type Param struct {
+	Key   string
+	Value string
+}
+
 type RequestData struct {
-	ID        string
-	Method    string
-	URL       string
-	Headers   http.Header
-	Body      []byte
-	Timestamp time.Time
-	Response  *ResponseData
+	ID         string
+	Method     string
+	URL        string
+	Headers    http.Header
+	Body       []byte
+	BodyParams []Param
+	Timestamp  time.Time
+	Response   *ResponseData
 }
 
 type ResponseData struct {
