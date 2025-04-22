@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16.4
+    ports:
+      - "54320:5432"
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_USER=${DB_USERNAME}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_NAME}
+    volumes:
+      - ./migrations/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - postgres_data:/var/lib/postgresql/data/
+    container_name: postgres
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U proxyuser -d proxydb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: proxy_backend
+    ports:
+      - "8080:8080"
+      - "8000:8000"
+    environment:
+      DB_DSN: "postgres://proxyuser:proxypass@postgres:5432/proxydb?sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - ./certs:/app/certs
+
+
+volumes:
+  postgres_data:

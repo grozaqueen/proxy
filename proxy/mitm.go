@@ -55,21 +55,43 @@ func (p *ProxyHandler) handleHTTPS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	destConn, err := tls.Dial("tcp", r.Host, &tls.Config{
-		ServerName: host,
-	})
+	bufReader := bufio.NewReader(tlsConn)
+	req, err := http.ReadRequest(bufReader)
 	if err != nil {
-		log.Printf("Failed to connect to target %s: %v", r.Host, err)
+		log.Printf("Failed to read HTTPS request: %v", err)
 		return
 	}
-	defer destConn.Close()
 
-	go func() {
-		io.Copy(destConn, tlsConn)
-		destConn.Close()
-	}()
+	req.URL.Scheme = "https"
+	req.URL.Host = req.Host
 
-	io.Copy(tlsConn, destConn)
+	reqData, err := p.saveRequest(req)
+	if err != nil {
+		log.Printf("Failed to save HTTPS request: %v", err)
+		return
+	}
+
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+			ServerName:         host,
+		},
+	}
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		log.Printf("Failed to forward HTTPS request: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if err := p.saveResponse(reqData.ID, resp); err != nil {
+		log.Printf("Failed to save HTTPS response: %v", err)
+	}
+
+	err = resp.Write(tlsConn)
+	if err != nil {
+		log.Printf("Failed to write HTTPS response back to client: %v", err)
+	}
 }
 
 func (p *ProxyHandler) mitmConnection(clientConn net.Conn, host string) {

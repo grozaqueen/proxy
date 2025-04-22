@@ -20,6 +20,7 @@ type RequestData struct {
 	BodyParams []Param
 	Timestamp  time.Time
 	Response   *ResponseData
+	Parsed     ParsedRequest
 }
 
 type ResponseData struct {
@@ -69,4 +70,30 @@ func (s *RequestStore) UpdateResponse(id string, resp *ResponseData) {
 	if req, exists := s.requests[id]; exists {
 		req.Response = resp
 	}
+}
+
+type ParsedRequest struct {
+	Method     string `json:"method"`
+	Scheme     string
+	Host       string
+	Path       string            `json:"path"`
+	GetParams  map[string]string `json:"get_params"`
+	Headers    map[string]string `json:"headers"`
+	Cookies    map[string]string `json:"cookies"`
+	PostParams map[string]string `json:"post_params"`
+	RawBody    []byte            `json:"raw_body"`
+}
+
+type ParsedResponse struct {
+	Code    int               `json:"code"`
+	Message string            `json:"message"`
+	Headers map[string]string `json:"headers"`
+	Body    []byte            `json:"body"`
+}
+
+type RequestRecord struct {
+	ID        string
+	Request   ParsedRequest
+	Response  ParsedResponse
+	Timestamp time.Time
 }

